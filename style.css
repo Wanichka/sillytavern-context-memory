@@ -1,9 +1,7 @@
 /* Context Tracker — theme-aware styles.
    Uses the same design system as Character Thoughts / Relationship Memory
    (shared variable scheme, layer colors via color-mix, 12px radius,
-   header on layer-1) so the three extensions read as one set.
-   Signature element borrowed from the set: the stats block carries
-   the same soft accent bar on the left as an intercepted thought. */
+   header on layer-1) so the three extensions read as one set. */
 
 #ctx-tracker-badge {
     --ctt-bg: var(--SmartThemeBlurTintColor, rgba(24, 24, 28, 0.96));
@@ -66,15 +64,13 @@
     text-transform: capitalize;
 }
 
-/* stats row with the set's signature accent bar on the left */
+/* stats row */
 #ctx-tracker-badge .ctt-stats {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
     gap: 12px;
     margin: 9px 12px 0;
-    padding-left: 10px;
-    border-left: 2px solid color-mix(in srgb, var(--ctt-accent) 70%, transparent);
 }
 
 #ctx-tracker-badge .ctt-stat {
@@ -85,8 +81,9 @@
 }
 
 #ctx-tracker-badge .ctt-label {
-    font-size: 11px;
-    font-style: italic;
+    font-size: 9.5px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
     color: var(--ctt-muted);
 }
 
