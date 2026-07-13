@@ -334,6 +334,8 @@
             setText('tokens', tokenText);
             badge.querySelector('.ctt-tokens')?.classList.toggle('ctt-over', tokenOver);
         }
+        // context full (tokens over the limit) drives the pulse alarm
+        badge.classList.toggle('ctt-full', settings.showTokens && tokenOver);
 
         // progress toward the summary threshold + "due" dot
         const bar = badge.querySelector('.ctt-progress');
