@@ -123,7 +123,8 @@
     transition: width 0.4s ease;
 }
 
-/* the "time to summarize" dot */
+/* the "time to summarize" dot — appears when the message interval
+   is reached; calm and static, it's a planned event */
 #ctx-tracker-badge .ctt-dot {
     width: 8px;
     height: 8px;
@@ -136,12 +137,13 @@
 #ctx-tracker-badge .ctt-dot.ctt-due {
     opacity: 1;
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--ctt-accent) 25%, transparent);
-    animation: ctt-pulse 2.4s ease-in-out infinite;
 }
 
-/* when due, the filled progress bar pulses too — a full-width signal
-   is far more visible than the dot alone */
-#ctx-tracker-badge:has(.ctt-dot.ctt-due) .ctt-progress-fill {
+/* context full (tokens over the limit) — the alarm state:
+   the progress bar, the token counter and the dot pulse together */
+#ctx-tracker-badge.ctt-full .ctt-progress-fill,
+#ctx-tracker-badge.ctt-full .ctt-tokens,
+#ctx-tracker-badge.ctt-full .ctt-dot.ctt-due {
     animation: ctt-pulse 2.4s ease-in-out infinite;
 }
 
@@ -179,8 +181,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-    #ctx-tracker-badge .ctt-dot.ctt-due,
-    #ctx-tracker-badge:has(.ctt-dot.ctt-due) .ctt-progress-fill {
+    #ctx-tracker-badge.ctt-full .ctt-progress-fill,
+    #ctx-tracker-badge.ctt-full .ctt-tokens,
+    #ctx-tracker-badge.ctt-full .ctt-dot.ctt-due {
         animation: none;
     }
     #ctx-tracker-badge .ctt-progress-fill {
