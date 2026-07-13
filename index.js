@@ -1,21 +1,52 @@
-
-// Context Tracker — мини-бейдж со статистикой контекста.
-// Показывает: id последнего сообщения (как в таверне, с 0), количество
-// сообщений в контексте (нескрытых), токены. Прогресс-полоска и точка
-// сигнализируют о приближении/наступлении порога пересказа.
+// Context Tracker — a tiny always-on-screen badge with live chat context stats.
+// Shows: last message id (SillyTavern's own 0-based id), number of visible
+// (non-hidden) messages, token usage. A progress bar and a pulsing dot signal
+// when it's time to summarize.
 
 (function () {
     'use strict';
 
     const MODULE = 'context_tracker';
-    const EDGE_MARGIN = 14; // обязательный отступ от краёв экрана, px
+    const EDGE_MARGIN = 14;      // mandatory margin from screen edges, px
+    const SCALE_MIN = 0.75;
+    const SCALE_MAX = 2.5;
 
     const DEFAULTS = {
         enabled: true,
-        interval: 100,     // порог пересказа (сообщений в контексте); 0 = выключить индикацию
+        interval: 100,           // summary threshold (visible messages); 0 = off
         showTokens: true,
         showProgress: true,
-        pos: null,         // {x, y} — сохранённая позиция бейджа
+        tokenLimit: 0,           // manual max-context for display; 0 = auto-detect
+        lang: 'en',              // 'en' | 'ru'
+        scale: 1,
+        pos: null,               // {x, y}
+    };
+
+    const I18N = {
+        en: {
+            firstMsg: 'first msg',
+            inCtx: 'in context',
+            due: 'Time to summarize',
+            s_show: 'Show badge',
+            s_tokens: 'Show tokens',
+            s_progress: 'Progress bar & "due" dot',
+            s_interval: 'Summary interval (messages in context, 0 = off):',
+            s_token_limit: 'Token limit for display (0 = auto-detect):',
+            s_lang: 'Language:',
+            s_reset: 'Reset badge position & size',
+        },
+        ru: {
+            firstMsg: 'первое соо',
+            inCtx: 'в контексте',
+            due: 'Пора делать пересказ',
+            s_show: 'Показывать бейдж',
+            s_tokens: 'Показывать токены',
+            s_progress: 'Полоска прогресса и точка «пора»',
+            s_interval: 'Интервал пересказа (сообщений в контексте, 0 — выкл.):',
+            s_token_limit: 'Лимит токенов для отображения (0 — автоопределение):',
+            s_lang: 'Язык:',
+            s_reset: 'Сбросить позицию и размер бейджа',
+        },
     };
 
     let ctx = null;
@@ -24,14 +55,19 @@
     let lastSignature = '';
     let tokenCacheKey = '';
     let tokenText = '—';
+    let tokenOver = false;
     let pollTimer = null;
 
-    // ---------- утилиты ----------
+    // ---------- utils ----------
+
+    function t(key) {
+        const lang = I18N[settings.lang] ? settings.lang : 'en';
+        return I18N[lang][key] ?? I18N.en[key] ?? key;
+    }
 
     function getSettings() {
         const store = ctx.extensionSettings;
         if (!store[MODULE]) store[MODULE] = {};
-        // дозаполняем новыми дефолтами при обновлениях расширения
         for (const k of Object.keys(DEFAULTS)) {
             if (store[MODULE][k] === undefined) store[MODULE][k] = DEFAULTS[k];
         }
@@ -51,19 +87,29 @@
         return String(n);
     }
 
+    function readIntFrom(id) {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        const v = parseInt(el.value ?? el.textContent, 10);
+        return Number.isFinite(v) && v > 0 ? v : null;
+    }
+
     function getMaxContext() {
+        // manual limit from settings wins — needed when context size is set
+        // to "unlimited" and auto-detection returns nonsense
+        const manual = Number(settings.tokenLimit);
+        if (Number.isFinite(manual) && manual > 0) return manual;
+        // chat completion APIs (OpenAI/Claude/Gemini etc.) keep their max context
+        // in a separate slider — check it first when that API is active
+        const mainApi = ctx.mainApi ?? document.getElementById('main_api')?.value;
+        if (mainApi === 'openai') {
+            const v = readIntFrom('openai_max_context');
+            if (v) return v;
+        }
         if (typeof ctx.maxContext === 'number' && ctx.maxContext > 0) return ctx.maxContext;
-        const el = document.getElementById('max_context');
-        if (el) {
-            const v = parseInt(el.value, 10);
-            if (v > 0) return v;
-        }
-        const counter = document.getElementById('max_context_counter');
-        if (counter) {
-            const v = parseInt(counter.value || counter.textContent, 10);
-            if (v > 0) return v;
-        }
-        return null;
+        return readIntFrom('openai_max_context')
+            ?? readIntFrom('max_context')
+            ?? readIntFrom('max_context_counter');
     }
 
     async function countTokens(text) {
@@ -77,40 +123,67 @@
         } catch (e) {
             console.warn(`[${MODULE}] token count failed, using estimate`, e);
         }
-        // грубая оценка, если API токенайзера недоступен
-        return Math.round(text.length / 3.2);
+        return Math.round(text.length / 3.2); // rough fallback
     }
 
-    // ---------- сбор статистики ----------
+    // ---------- stats ----------
 
     function collect() {
         const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
         const total = chat.length;
-        const lastId = total > 0 ? total - 1 : null; // ровно тот mesid, что в таверне (с нуля)
         const visible = chat.filter(m => m && !m.is_system);
-        return { chat, total, lastId, visible };
+        // first non-hidden message = oldest message still in context.
+        // Exact Tavern mesid (0-based): hid 0–295 → firstVisibleId = 296
+        const firstIdx = chat.findIndex(m => m && !m.is_system);
+        const firstVisibleId = firstIdx >= 0 ? firstIdx : null;
+        return { chat, total, firstVisibleId, visible };
     }
 
     function signatureOf(s) {
         const lastLen = s.total ? String((s.chat[s.total - 1].mes || '').length) : '0';
-        return `${s.total}:${s.visible.length}:${lastLen}`;
+        return `${s.total}:${s.visible.length}:${s.firstVisibleId}:${lastLen}`;
     }
 
-    // ---------- бейдж ----------
+    // ---------- badge ----------
 
     function buildBadge() {
         badge = document.createElement('div');
         badge.id = 'ctx-tracker-badge';
         badge.innerHTML = `
-            <div class="ctt-dot" title="Пора делать пересказ"></div>
-            <div class="ctt-row"><span class="ctt-label">соо</span><span class="ctt-val" data-ctt="last">—</span></div>
-            <div class="ctt-row"><span class="ctt-label">в контексте</span><span class="ctt-val" data-ctt="visible">—</span></div>
-            <div class="ctt-row ctt-tokens-row"><span class="ctt-val ctt-tokens" data-ctt="tokens">—</span></div>
+            <div class="ctt-accent"></div>
+            <div class="ctt-header">
+                <span class="ctt-title">context</span>
+                <div class="ctt-dot"></div>
+            </div>
+            <div class="ctt-row"><span class="ctt-label" data-ctti="firstMsg"></span><span class="ctt-val" data-ctt="first">—</span></div>
+            <div class="ctt-row"><span class="ctt-label" data-ctti="inCtx"></span><span class="ctt-val" data-ctt="visible">—</span></div>
+            <div class="ctt-tokens-block">
+                <div class="ctt-sep"></div>
+                <div class="ctt-row ctt-tokens-row"><span class="ctt-tokens" data-ctt="tokens">—</span></div>
+            </div>
             <div class="ctt-progress"><div class="ctt-progress-fill"></div></div>
+            <div class="ctt-resize" title="Resize"></div>
         `;
         document.body.appendChild(badge);
+        refreshI18n();
+        applyScale();
         initDrag();
+        initResize();
         applyPosition();
+    }
+
+    function refreshI18n() {
+        document.querySelectorAll('[data-ctti]').forEach(el => {
+            el.textContent = t(el.getAttribute('data-ctti'));
+        });
+        const dot = badge?.querySelector('.ctt-dot');
+        if (dot) dot.title = t('due');
+    }
+
+    function applyScale() {
+        const s = Math.min(Math.max(Number(settings.scale) || 1, SCALE_MIN), SCALE_MAX);
+        settings.scale = s;
+        badge.style.transform = `scale(${s})`;
     }
 
     function applyPosition() {
@@ -119,8 +192,8 @@
         if (settings.pos && Number.isFinite(settings.pos.x) && Number.isFinite(settings.pos.y)) {
             ({ x, y } = settings.pos);
         } else {
-            // позиция по умолчанию: правый верхний угол
-            x = window.innerWidth - badge.offsetWidth - EDGE_MARGIN - 10;
+            const r = badge.getBoundingClientRect();
+            x = window.innerWidth - r.width - EDGE_MARGIN - 10;
             y = 70;
         }
         const c = clampPos(x, y);
@@ -129,8 +202,10 @@
     }
 
     function clampPos(x, y) {
-        const w = badge.offsetWidth || 140;
-        const h = badge.offsetHeight || 70;
+        // getBoundingClientRect respects the current scale
+        const r = badge.getBoundingClientRect();
+        const w = r.width || 140;
+        const h = r.height || 80;
         const maxX = Math.max(EDGE_MARGIN, window.innerWidth - w - EDGE_MARGIN);
         const maxY = Math.max(EDGE_MARGIN, window.innerHeight - h - EDGE_MARGIN);
         return {
@@ -144,6 +219,7 @@
         let startX = 0, startY = 0, origX = 0, origY = 0;
 
         badge.addEventListener('pointerdown', (e) => {
+            if (e.target.closest('.ctt-resize')) return; // grip has its own handler
             dragging = true;
             badge.setPointerCapture(e.pointerId);
             badge.classList.add('ctt-dragging');
@@ -179,12 +255,53 @@
         });
     }
 
+    function initResize() {
+        const grip = badge.querySelector('.ctt-resize');
+        let resizing = false;
+        let startX = 0, startY = 0, startScale = 1;
+
+        grip.addEventListener('pointerdown', (e) => {
+            resizing = true;
+            grip.setPointerCapture(e.pointerId);
+            badge.classList.add('ctt-resizing');
+            startX = e.clientX;
+            startY = e.clientY;
+            startScale = settings.scale || 1;
+            e.stopPropagation();
+            e.preventDefault();
+        });
+
+        grip.addEventListener('pointermove', (e) => {
+            if (!resizing) return;
+            // diagonal drag = uniform scaling, proportions stay intact
+            const delta = ((e.clientX - startX) + (e.clientY - startY)) / 2;
+            settings.scale = startScale + delta / 140;
+            applyScale();
+        });
+
+        const stop = (e) => {
+            if (!resizing) return;
+            resizing = false;
+            badge.classList.remove('ctt-resizing');
+            try { grip.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+            // after scaling, make sure the badge is still fully on screen
+            const r = badge.getBoundingClientRect();
+            const c = clampPos(r.left, r.top);
+            badge.style.left = c.x + 'px';
+            badge.style.top = c.y + 'px';
+            settings.pos = { x: c.x, y: c.y };
+            save();
+        };
+        grip.addEventListener('pointerup', stop);
+        grip.addEventListener('pointercancel', stop);
+    }
+
     function setText(key, value) {
         const el = badge.querySelector(`[data-ctt="${key}"]`);
         if (el) el.textContent = value;
     }
 
-    // ---------- обновление ----------
+    // ---------- update ----------
 
     async function update(force = false) {
         if (!badge) return;
@@ -197,27 +314,29 @@
         if (!force && sig === lastSignature) return;
         lastSignature = sig;
 
-        setText('last', s.lastId === null ? '—' : String(s.lastId));
+        setText('first', s.firstVisibleId === null ? '—' : String(s.firstVisibleId));
         setText('visible', String(s.visible.length));
 
-        // токены — считаем только по видимым сообщениям, с кэшем
-        const tokensRow = badge.querySelector('.ctt-tokens-row');
-        tokensRow.style.display = settings.showTokens ? '' : 'none';
+        // tokens — visible messages only, cached per signature
+        const tokensBlock = badge.querySelector('.ctt-tokens-block');
+        tokensBlock.style.display = settings.showTokens ? '' : 'none';
         if (settings.showTokens) {
             if (sig !== tokenCacheKey) {
                 tokenCacheKey = sig;
                 const text = s.visible.map(m => m.mes || '').join('\n');
                 const count = await countTokens(text);
-                // за время await чат мог измениться — не затираем свежие данные старыми
+                // the chat may have changed during await — don't clobber fresh data
                 if (tokenCacheKey === sig) {
                     const max = getMaxContext();
                     tokenText = fmtTokens(count) + (max ? ' / ' + fmtTokens(max) : '');
+                    tokenOver = Boolean(max && count > max);
                 }
             }
             setText('tokens', tokenText);
+            badge.querySelector('.ctt-tokens')?.classList.toggle('ctt-over', tokenOver);
         }
 
-        // прогресс к порогу пересказа + точка «пора»
+        // progress toward the summary threshold + "due" dot
         const bar = badge.querySelector('.ctt-progress');
         const fill = badge.querySelector('.ctt-progress-fill');
         const dot = badge.querySelector('.ctt-dot');
@@ -235,12 +354,11 @@
     }
 
     function scheduleUpdate() {
-        // микро-дебаунс, чтобы не дёргать пересчёт на каждый чих подряд
         clearTimeout(scheduleUpdate._t);
         scheduleUpdate._t = setTimeout(() => update(), 150);
     }
 
-    // ---------- панель настроек ----------
+    // ---------- settings panel ----------
 
     function addSettingsPanel() {
         const html = `
@@ -253,20 +371,27 @@
                 <div class="inline-drawer-content">
                     <label class="checkbox_label">
                         <input type="checkbox" id="ctt_enabled">
-                        <span>Показывать бейдж</span>
+                        <span data-ctti="s_show"></span>
                     </label>
                     <label class="checkbox_label">
                         <input type="checkbox" id="ctt_show_tokens">
-                        <span>Показывать токены</span>
+                        <span data-ctti="s_tokens"></span>
                     </label>
                     <label class="checkbox_label">
                         <input type="checkbox" id="ctt_show_progress">
-                        <span>Полоска прогресса и точка «пора»</span>
+                        <span data-ctti="s_progress"></span>
                     </label>
-                    <label for="ctt_interval">Интервал пересказа (сообщений в контексте, 0 — выкл.):</label>
+                    <label for="ctt_interval" data-ctti="s_interval"></label>
                     <input type="number" id="ctt_interval" class="text_pole" min="0" step="10">
-                    <div class="menu_button" id="ctt_reset_pos" title="Вернуть бейдж в угол по умолчанию">
-                        Сбросить позицию бейджа
+                    <label for="ctt_token_limit" data-ctti="s_token_limit"></label>
+                    <input type="number" id="ctt_token_limit" class="text_pole" min="0" step="1000">
+                    <label for="ctt_lang" data-ctti="s_lang"></label>
+                    <select id="ctt_lang" class="text_pole">
+                        <option value="en">English</option>
+                        <option value="ru">Русский</option>
+                    </select>
+                    <div class="menu_button" id="ctt_reset_pos">
+                        <span data-ctti="s_reset"></span>
                     </div>
                 </div>
             </div>
@@ -275,7 +400,7 @@
         const target = document.getElementById('extensions_settings2')
             || document.getElementById('extensions_settings');
         if (!target) {
-            console.warn(`[${MODULE}] не нашла контейнер настроек расширений`);
+            console.warn(`[${MODULE}] extensions settings container not found`);
             return;
         }
         target.insertAdjacentHTML('beforeend', html);
@@ -284,12 +409,16 @@
         const $tokens = document.getElementById('ctt_show_tokens');
         const $progress = document.getElementById('ctt_show_progress');
         const $interval = document.getElementById('ctt_interval');
+        const $tokenLimit = document.getElementById('ctt_token_limit');
+        const $lang = document.getElementById('ctt_lang');
         const $reset = document.getElementById('ctt_reset_pos');
 
         $enabled.checked = settings.enabled;
         $tokens.checked = settings.showTokens;
         $progress.checked = settings.showProgress;
         $interval.value = settings.interval;
+        $tokenLimit.value = settings.tokenLimit;
+        $lang.value = I18N[settings.lang] ? settings.lang : 'en';
 
         $enabled.addEventListener('change', () => { settings.enabled = $enabled.checked; save(); update(true); });
         $tokens.addEventListener('change', () => { settings.showTokens = $tokens.checked; save(); update(true); });
@@ -300,14 +429,30 @@
             save();
             update(true);
         });
+        $tokenLimit.addEventListener('input', () => {
+            const v = parseInt($tokenLimit.value, 10);
+            settings.tokenLimit = Number.isFinite(v) && v >= 0 ? v : 0;
+            tokenCacheKey = ''; // force the denominator to refresh
+            save();
+            update(true);
+        });
+        $lang.addEventListener('change', () => {
+            settings.lang = $lang.value;
+            save();
+            refreshI18n();
+        });
         $reset.addEventListener('click', () => {
             settings.pos = null;
-            save();
+            settings.scale = 1;
+            applyScale();
             applyPosition();
+            save();
         });
+
+        refreshI18n();
     }
 
-    // ---------- события ----------
+    // ---------- events ----------
 
     function bindEvents() {
         const et = ctx.eventTypes || {};
@@ -325,8 +470,8 @@
             ctx.eventSource.on(name, scheduleUpdate);
         }
 
-        // страховка: /hide и некоторые действия не всегда кидают события —
-        // раз в 2 секунды дёшево сверяем сигнатуру и обновляем при изменениях
+        // safety net: /hide doesn't always emit events — a cheap signature
+        // check every 2 s catches anything the events missed
         pollTimer = setInterval(() => update(), 2000);
     }
 
@@ -336,7 +481,7 @@
         try {
             ctx = SillyTavern.getContext();
         } catch (e) {
-            console.error(`[${MODULE}] SillyTavern context недоступен`, e);
+            console.error(`[${MODULE}] SillyTavern context is not available`, e);
             return;
         }
         settings = getSettings();
