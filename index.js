@@ -8,6 +8,12 @@
 
     const MODULE = 'context_tracker';
     const EDGE_MARGIN = 14;      // mandatory margin from screen edges, px
+    // the extension can't see the request's service framing (roles, formatting),
+    // so the raw count lands slightly BELOW the provider's real number.
+    // A context gauge must err toward "fuller", never "emptier" — this margin
+    // covers the framing and keeps the error on the safe side.
+    const TOKEN_SAFETY_MARGIN = 1.025;
+
     const SCALE_MIN = 0.75;
     const SCALE_MAX = 2.5;
 
@@ -495,8 +501,9 @@
         if (!text) return;
         void (async () => {
             try {
-                promptTokens = await countTokens(text);
-                console.debug(`[${MODULE}] prompt tokens: ${promptTokens} (source: assembled prompt)`);
+                const raw = await countTokens(text);
+                promptTokens = Math.round(raw * TOKEN_SAFETY_MARGIN);
+                console.info(`[${MODULE}] prompt tokens: ${raw} raw, ${promptTokens} with safety margin (source: assembled prompt)`);
                 update(true);
             } catch (e) {
                 console.warn(`[${MODULE}] failed to count assembled prompt`, e);
