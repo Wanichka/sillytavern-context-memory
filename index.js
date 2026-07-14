@@ -444,10 +444,14 @@
 
     // ---------- events ----------
 
-    async function onPromptReady(data) {
+    function onPromptReady(data) {
+        // IMPORTANT: SillyTavern awaits this event's handlers before sending
+        // the request. Extract the text synchronously (cheap), return
+        // immediately, and count tokens detached so generation is never
+        // delayed by us.
+        let text = '';
         try {
             if (!data || data.dryRun) return;
-            let text = '';
             if (Array.isArray(data.chat)) {
                 // chat completion: array of {role, content}
                 text = data.chat
@@ -459,13 +463,20 @@
             } else if (typeof data === 'string') {
                 text = data;
             }
-            if (!text) return;
-            promptTokens = await countTokens(text);
-            console.debug(`[${MODULE}] prompt tokens: ${promptTokens} (source: assembled prompt)`);
-            update(true);
         } catch (e) {
-            console.warn(`[${MODULE}] failed to count assembled prompt`, e);
+            console.warn(`[${MODULE}] failed to read assembled prompt`, e);
+            return;
         }
+        if (!text) return;
+        void (async () => {
+            try {
+                promptTokens = await countTokens(text);
+                console.debug(`[${MODULE}] prompt tokens: ${promptTokens} (source: assembled prompt)`);
+                update(true);
+            } catch (e) {
+                console.warn(`[${MODULE}] failed to count assembled prompt`, e);
+            }
+        })();
     }
 
     function bindEvents() {
