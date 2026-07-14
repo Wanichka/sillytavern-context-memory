@@ -55,6 +55,8 @@
     let tokenMax = 0;
     let promptTokens = null;   // tokens of the last really assembled prompt
     let tokenSource = 'chat';  // 'prompt' | 'chat' | 'estimate' (for debugging)
+    let tokenizerFn = null;    // getTokenCountAsync imported from ST's tokenizers module
+    let tokenizerKind = 'unresolved';
     let pollTimer = null;
 
     // ---------- utils ----------
@@ -111,16 +113,39 @@
             ?? readIntFrom('max_context_counter');
     }
 
+    async function resolveTokenizer() {
+        if (typeof ctx.getTokenCountAsync === 'function') {
+            tokenizerFn = (t) => ctx.getTokenCountAsync(t);
+            tokenizerKind = 'context API (getTokenCountAsync)';
+            return;
+        }
+        if (typeof ctx.getTokenCount === 'function') {
+            tokenizerFn = (t) => Promise.resolve(ctx.getTokenCount(t));
+            tokenizerKind = 'context API (getTokenCount)';
+            return;
+        }
+        // context API not exposed — import ST's tokenizers module directly
+        for (const path of ['/scripts/tokenizers.js', '../../../tokenizers.js']) {
+            try {
+                const mod = await import(path);
+                if (typeof mod.getTokenCountAsync === 'function') {
+                    tokenizerFn = (t) => mod.getTokenCountAsync(t);
+                    tokenizerKind = `module import (${path})`;
+                    return;
+                }
+            } catch { /* try next path */ }
+        }
+        tokenizerFn = null;
+        tokenizerKind = 'char estimate (~len/3.2) — IMPRECISE';
+    }
+
     async function countTokens(text) {
-        try {
-            if (typeof ctx.getTokenCountAsync === 'function') {
-                return await ctx.getTokenCountAsync(text);
+        if (tokenizerFn) {
+            try {
+                return await tokenizerFn(text);
+            } catch (e) {
+                console.warn(`[${MODULE}] tokenizer call failed, using estimate`, e);
             }
-            if (typeof ctx.getTokenCount === 'function') {
-                return ctx.getTokenCount(text);
-            }
-        } catch (e) {
-            console.warn(`[${MODULE}] token count failed, using estimate`, e);
         }
         tokenSource = 'estimate';
         return Math.round(text.length / 3.2); // rough fallback, noticeably imprecise
@@ -519,6 +544,8 @@
             return;
         }
         settings = getSettings();
+        await resolveTokenizer();
+        console.info(`[${MODULE}] token counting via: ${tokenizerKind}`);
         buildBadge();
         addSettingsPanel();
         bindEvents();
